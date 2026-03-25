@@ -1,6 +1,11 @@
 # API Dash Agentic API Testing with MCP app Prototype (GSoC 2026)
 
 This repository contains a functional Model Context Protocol (MCP) implementation within a native Flutter desktop environment. It serves as the primary technical validation for my GSoC 2026 proposal, demonstrating how AI agents can autonomously generate, execute, and self-heal API test suites.
+
+## Visual sneak
+
+<img width="1500" height="750" alt="image" src="https://github.com/user-attachments/assets/1f84edcc-7d6f-4841-8821-1fff15ef3861" />
+
 ## Challenges
 Sandard AI integrations in developer tools are often restricted to "chatboxes" that lack deep integration with the host application's UI and native capabilities. This project solves two major hurdles:
 
