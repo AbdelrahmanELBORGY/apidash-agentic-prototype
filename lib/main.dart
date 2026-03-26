@@ -36,7 +36,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isAiThinking = false;
   String _lastGeneratedJson = "";
 
-  final String _apiKey = 'INSERT API KEY HERE';
+  final String _apiKey = 'INSERT API KEY  HERE';
   late final GenerativeModel _model;
 
   @override
