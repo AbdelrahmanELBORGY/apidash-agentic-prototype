@@ -17,7 +17,7 @@ void main() {
             "protocolVersion": "2024-11-05",
             "capabilities": {
               "tools": {},
-              "prompts": {} // <-- We tell Claude we have built-in prompts!
+              "prompts": {}
             },
             "serverInfo": {"name": "apidash-agentic-engine", "version": "6.0.0"}
           }
@@ -48,7 +48,6 @@ void main() {
       else if (rpcMethod == 'prompts/get' && requestJson['params']['name'] == 'run_agentic_tests') {
         final specUrl = requestJson['params']['arguments']['api_spec_url'];
 
-        // Here is your exact prompt, stored securely on the server!
         final promptText = """
 You are the API Dash Autonomous Testing Agent. I want you to perform an end-to-end Agentic workflow.
 
@@ -108,7 +107,6 @@ Step 4: Report. Print out a final Test Coverage Report showing what you tested, 
 
       // 5. EXECUTE TOOLS
       else if (rpcMethod == 'tools/call' && requestJson['params']['name'] == 'read_openapi_spec') {
-        // Now it fetches a REAL spec dynamically!
         final url = requestJson['params']['arguments']['url'];
         try {
           final response = await http.get(Uri.parse(url));
