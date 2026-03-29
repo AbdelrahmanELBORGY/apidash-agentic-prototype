@@ -125,9 +125,6 @@ Completely quit and restart Claude Desktop.
 
 Watch as Claude autonomously reads the spec, generates accurate mock data, and executes native HTTP tests bypassing all CORS restrictions!
 
-Paste a public OpenAPI specification URL into the argument box (e.g., the Swagger Petstore: `https://raw.githubusercontent.com/OAI/OpenAPI-Specification/main/examples/v3.0/petstore.json`) and press Enter.
-
-Watch as Claude autonomously reads the spec, generates accurate mock data, and executes native HTTP tests bypassing all CORS restrictions!
 
 ## GSoC 2026 Proposal
 This prototype is part of a comprehensive proposal for API Dash.
