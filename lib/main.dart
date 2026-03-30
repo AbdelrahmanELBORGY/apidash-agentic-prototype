@@ -1,7 +1,18 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:webview_windows/webview_windows.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
+
+// The latest Alpha packages
+import 'package:genui/genui.dart';
+import 'package:json_schema_builder/json_schema_builder.dart' as jsb;
+
+import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
+
+import 'dart:isolate';
+// Import the isolate function you just created!
+import 'mcpServer_genui.dart';
 
 void main() {
   runApp(const ApiDashAgentApp());
@@ -14,7 +25,7 @@ class ApiDashAgentApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'API Dash Agent Console',
-      theme: ThemeData.light(useMaterial3: true), // Light theme based on your image
+      theme: ThemeData.light(useMaterial3: true),
       home: const DashboardScreen(),
       debugShowCheckedModeBanner: false,
     );
@@ -29,81 +40,124 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final _webviewController = WebviewController();
   final TextEditingController _promptController = TextEditingController();
+  final TextEditingController _urlController = TextEditingController();
 
-  bool _isWebviewInitialized = false;
   bool _isAiThinking = false;
-  String _lastGeneratedJson = "";
 
-  final String _apiKey = 'INSERT API KEY  HERE';
+  final String _apiKey = 'YOUR APIKEY';
   late final GenerativeModel _model;
+
+  final bool _useStrictGenUiEngine = false;
+
+  // GenUI Latest Core Components
+  late final Catalog _catalog;
+  late final jsb.Schema _dashboardSchema;
+
+  Map<String, dynamic>? _currentDashboardData;
+  bool _isHealedRun = false;
 
   @override
   void initState() {
     super.initState();
     _model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: _apiKey);
-    _initWebView();
+    _initGenUI();
   }
 
-  Future<void> _initWebView() async {
-    try {
-      await _webviewController.initialize();
-      _webviewController.webMessage.listen((dynamic message) {
-        _handleMcpMessage(message.toString());
-      });
-
-      // INITIAL EMPTY STATE JSON
-      String initialJson = '''
-      {
-        "explanation": "Welcome to the Agentic Console. Type a goal in the prompt box below to generate your first test suite.",
-        "tests": []
-      }
-      ''';
-
-      await _renderMcpApp(initialJson, isHealed: false);
-      setState(() => _isWebviewInitialized = true);
-    } catch (e) {
-      debugPrint("WebView init failed: $e");
-    }
-  }
-
-  /// 1. THE AI GENERATION PHASE
-  Future<void> _generateTestPlan(String userPrompt) async {
-    // HANDLE EMPTY PROMPT
-    if (userPrompt.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Row(
-            children: [
-              Icon(Icons.warning_amber_rounded, color: Colors.white),
-              SizedBox(width: 10),
-              Text("Please enter a testing goal before generating.", style: TextStyle(fontWeight: FontWeight.bold)),
-            ],
+  void _initGenUI() {
+    // 1. DEFINE THE GEN-UI SCHEMA
+    // This guarantees the AI knows exactly what data the widget needs.
+    _dashboardSchema = jsb.Schema.object(
+      properties: {
+        'explanation': jsb.Schema.string(description: 'Brief explanation of the test strategy.'),
+        'tests': jsb.Schema.list(
+          items: jsb.Schema.object(
+            properties: {
+              'title': jsb.Schema.string(),
+              'expected': jsb.Schema.string(),
+              // NEW FIELDS FOR REAL EXECUTION
+              'url': jsb.Schema.string(),
+              'method': jsb.Schema.string(),
+              'body': jsb.Schema.string(description: 'Raw JSON string for the request body, or empty'),
+              'expected_status': jsb.Schema.integer(description: 'The exact HTTP status code expected (e.g., 200, 400, 403)'),
+            },
+            required: ['title', 'expected', 'url', 'method', 'expected_status'],
           ),
-          backgroundColor: const Color(0xFFb000ff), // Matches your API Dash theme
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          margin: const EdgeInsets.only(bottom: 80, left: 20, right: 20),
         ),
+      },
+      required: ['explanation', 'tests'],
+    );
+
+
+    // 2. REGISTER THE NATIVE WIDGET IN THE CATALOG
+    _catalog = Catalog(
+      [
+        CatalogItem(
+          name: 'TestPlanDashboard',
+          dataSchema: _dashboardSchema,
+          widgetBuilder: (itemContext) {
+            // Extract the AI's generated JSON from the new context object
+            final dataModel = itemContext.data as Map<String, dynamic>;
+
+            return NativeTestDashboard(
+              data: dataModel,
+              isHealed: _isHealedRun,
+              onHealRequested: (List<Map<String, dynamic>> results) {
+                _triggerSelfHealing(results);
+              },
+            );
+
+          },
+        ),
+      ],
+      catalogId: 'api_dash_components',
+    );
+
+    // Initial Empty State
+    setState(() {
+      _currentDashboardData = {
+        "explanation": "Welcome to the Agentic Console. Type a goal below to generate your native UI test suite.",
+        "tests": []
+      };
+    });
+  }
+
+  Future<void> _generateTestPlan(String userPrompt) async {
+    if (userPrompt.trim().isEmpty) return;
+
+    final targetUrl = _urlController.text.trim();
+    if (targetUrl.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Please enter a Target API URL first!")),
       );
       return;
     }
 
-    setState(() => _isAiThinking = true);
+    setState(() {
+      _isAiThinking = true;
+      _isHealedRun = false;
+    });
 
     try {
+      // THE CORRECT GENERATION PROMPT
       final prompt = '''
-      You are an API testing agent. The user wants to: "$userPrompt".
-      Generate 4 API test cases covering different scenarios (e.g., success, missing auth, invalid data). 
-      Return ONLY a raw JSON object, no markdown wrappers.
-      Format: {"explanation": "Briefly explain strategy", "tests": [{"title": "Test Name", "expected": "200 OK"}]}
+      You are an API testing agent. 
+      The absolute Base URL is: "$targetUrl"
+      The user's goal is: "$userPrompt".
+      
+      Generate 4 real API test cases. 
+      CRITICAL: Use the exact Base URL provided and append the correct endpoint path. For example, if Base is 'https://dummyjson.com', the login endpoint MUST be 'https://dummyjson.com/auth/login'.
+      
+      Return ONLY a raw JSON object matching this exact format:
+      {"explanation": "Strategy", "tests": [{"title": "Valid Login", "expected": "Returns token", "url": "$targetUrl/auth/login", "method": "POST", "body": "{\\"username\\": \\"emilys\\", \\"password\\": \\"emilyspass\\"}", "expected_status": 200}]}
       ''';
 
       final response = await _model.generateContent([Content.text(prompt)]);
-      _lastGeneratedJson = response.text?.replaceAll('```json', '').replaceAll('```', '').trim() ?? '{}';
+      final String jsonStr = response.text?.replaceAll('```json', '').replaceAll('```', '').trim() ?? '{}';
 
-      await _renderMcpApp(_lastGeneratedJson, isHealed: false);
+      setState(() {
+        _currentDashboardData = jsonDecode(jsonStr);
+      });
     } catch (e) {
       debugPrint("AI Error: $e");
     } finally {
@@ -112,32 +166,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  /// 2. THE SELF-HEALING PHASE
-  Future<void> _triggerSelfHealing(String failedTestsJson) async {
-    setState(() => _isAiThinking = true);
-    await _webviewController.executeScript("document.getElementById('status').innerText = 'Status: AI is analyzing the failures and self-healing...';");
+  Future<void> _triggerSelfHealing(List<Map<String, dynamic>> lastResults) async {
+    setState(() {
+      _isAiThinking = true;
+      _isHealedRun = true;
+    });
 
     try {
+      // 1. Build the failure report
+      final List<dynamic> currentTests = _currentDashboardData?['tests'] ?? [];
+      String failureReport = "";
+
+      for (int i = 0; i < lastResults.length; i++) {
+        final res = lastResults[i];
+        if (res['passed'] == false) {
+          final failedTest = currentTests[res['index']];
+          failureReport += "- Test '${failedTest['title']}': Expected status ${failedTest['expected_status']}, but got ${res['message']}. Payload used: ${failedTest['body']}\n";
+        }
+      }
+
+      // 2. Encode the old data
+      final String oldData = jsonEncode(_currentDashboardData);
+
+      // 3. Construct the prompt using the variables we JUST created above
       final prompt = '''
-      You are an API testing agent. The following test plan was executed: 
-      $failedTestsJson
+      You are an expert API testing agent debugging a failed test suite.
       
-      Test 2 failed with "403 Forbidden" (missing auth). Test 4 failed with "400 Bad Request" (missing required payload field).
-      Fix ONLY the failed tests. 
+      CURRENT TEST PLAN:
+      $oldData
+      
+      EXECUTION FAILURES:
+      $failureReport
       
       CRITICAL INSTRUCTIONS:
-      1. Keep the titles and expected results of the passing tests (Test 1 and Test 3) EXACTLY the same.
-      2. For the failed tests, change the "title" to explicitly include the fix (e.g., append "(Added Auth Header)" or "(Fixed Payload)").
+      1. DO NOT touch the tests that did not fail. Keep their titles and payloads EXACTLY the same.
+      2. For the FAILED tests, analyze the error. You MUST make real, actual changes to the 'body' or 'url' to fix them. Do not write "hypothetically adjusted". 
+      3. Hint: reqres.in /api/login specifically requires the email "eve.holt@reqres.in" to return a 200 OK. If a test failed with 403, your payload was likely wrong or missing this email.
+      4. ONLY for the tests you actually fixed, append " (Healed)" to the 'title'.
+      5. In the 'explanation' field, write exactly what values you changed.
       
-      Return ONLY a raw JSON object, no markdown wrappers.
-      Format: {"explanation": "Explain what you modified", "tests": [{"title": "Test Name", "expected": "200 OK"}]}
+      Return ONLY a raw JSON object matching the original schema.
       ''';
 
+      // 4. Send to Gemini
       final response = await _model.generateContent([Content.text(prompt)]);
-      final String healedJson = response.text?.replaceAll('```json', '').replaceAll('```', '').trim() ?? '{}';
+      final String healedJsonStr = response.text?.replaceAll('```json', '').replaceAll('```', '').trim() ?? '{}';
 
-      await _renderMcpApp(healedJson, isHealed: true, oldContent: _lastGeneratedJson);
-      _lastGeneratedJson = healedJson;
+      setState(() {
+        _currentDashboardData = jsonDecode(healedJsonStr);
+      });
     } catch (e) {
       debugPrint("Healing Error: $e");
     } finally {
@@ -145,270 +222,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  /// 3. THE HTML/JS MCP APP TEMPLATE
-  Future<void> _renderMcpApp(String content, {bool isHealed = false, String? oldContent}) async {
-    String htmlList = "";
-    String explanationBox = "";
-    int totalTests = 0;
-
-    if (content.startsWith('{')) {
-      try {
-        final Map<String, dynamic> data = jsonDecode(content);
-        final List<dynamic> tests = data['tests'] ?? [];
-        totalTests = tests.length;
-        final String explanation = data['explanation'] ?? "";
-
-        if (explanation.isNotEmpty) {
-          final bgColor = isHealed ? "#e8f5e9" : "#f3e5f5";
-          final borderColor = isHealed ? "#4CAF50" : "#b000ff";
-          final boxTitle = isHealed ? "🛠️ What was modified:" : "💡 AI Test Strategy:";
-          explanationBox = '<div style="background: $bgColor; border-left: 4px solid $borderColor; padding: 10px; margin-bottom: 15px; border-radius: 6px; font-size: 13px;"><strong>$boxTitle</strong> $explanation</div>';
-        }
-
-        if (!isHealed) {
-          htmlList = tests.asMap().entries.map((entry) {
-            return "<li id='test-${entry.key}' class='test-item default-test'><strong>${entry.value['title']}</strong><br/><span style='color:#666; font-size:12px;'>Expects: ${entry.value['expected']}</span><div id='msg-${entry.key}' style='margin-top:4px; font-size:12px;'></div></li>";
-          }).join('');
-        } else {
-          List<dynamic> oldTests = [];
-          if (oldContent != null) {
-            try { oldTests = jsonDecode(oldContent)['tests'] ?? []; } catch (_) {}
-          }
-
-          htmlList = tests.asMap().entries.map((entry) {
-            var t = entry.value;
-            var oldT = (oldTests.length > entry.key) ? oldTests[entry.key] : null;
-            String oldJsonStr = oldT != null ? jsonEncode(oldT) : "";
-            String newJsonStr = jsonEncode(t);
-
-            if (oldT != null && oldJsonStr != newJsonStr) {
-              return '''
-               <li id='test-${entry.key}' style='background: transparent; padding: 0; border: none; margin-bottom: 10px;'>
-                 <div style='display: flex; flex-direction: column; gap: 4px;'>
-                   <div style='background: #ffebee; border-left: 4px solid #f44336; padding: 8px 12px; border-radius: 6px; color: #c62828;'>
-                     <span style='text-decoration: line-through; font-weight: bold; font-size: 13px;'>✗ Old: ${oldT['title']}</span>
-                   </div>
-                   <div style='background: #e8f5e9; border-left: 4px solid #4CAF50; padding: 8px 12px; border-radius: 6px; color: #2e7d32;'>
-                     <span style='font-weight: bold; font-size: 13px;'>✓ New: ${t['title']}</span><br/>
-                     <span style='font-size: 11px; opacity: 0.8;'>Expects: ${t['expected']}</span>
-                   </div>
-                 </div>
-                 <div id='msg-${entry.key}' style='margin-top:4px; font-size:12px;'></div>
-               </li>
-               ''';
-            } else {
-              return '''
-               <li id='test-${entry.key}' style='background: #f5f5f5; border-left: 4px solid #9e9e9e; padding: 10px 12px; border-radius: 6px; margin-bottom: 10px;'>
-                 <strong style='color: #424242; font-size: 13px;'>${t['title']}</strong> <span style='color:#757575; font-size:11px;'>(Unchanged)</span><br/>
-                 <span style='color:#666; font-size:12px;'>Expects: ${t['expected']}</span>
-                 <div id='msg-${entry.key}' style='margin-top:4px; font-size:12px;'></div>
-               </li>
-               ''';
-            }
-          }).join('');
-        }
-      } catch (e) { debugPrint("JSON Parse Error: $e"); }
-    }
-
-    final String safeContentForJs = content.replaceAll("'", "\\'").replaceAll('\n', '\\n');
-
-    final String html = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        :root { color-scheme: light; }
-        html, body { background-color: #F5F5F7; margin: 0; height: 100%; font-family: 'Segoe UI', sans-serif; padding: 10px; color: #333; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #F5F5F7; }
-        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
-        
-        .card { border: 1px solid #e0e0e0; padding: 20px; border-radius: 12px; background: white; box-shadow: 0 4px 12px rgba(0,0,0,0.04); }
-        
-        /* Compact Metrics Row */
-        .dashboard-stats { display: flex; gap: 10px; margin-bottom: 15px; }
-        .stat-box { flex: 1; padding: 10px; border-radius: 8px; background: #f8f9fa; text-align: center; border: 1px solid #eee; transition: 0.3s; }
-        .stat-value { font-size: 20px; font-weight: bold; margin-bottom: 2px; }
-        .stat-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
-        
-        button { padding: 8px 16px; cursor: pointer; border: none; border-radius: 6px; color: white; font-weight: bold; transition: 0.2s; font-size: 13px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
-        #runBtn { background: linear-gradient(135deg, #6b4ce6, #b000ff); } 
-        #runBtn:hover { opacity: 0.9; transform: translateY(-1px); }
-        #runBtn:disabled { background: #9e9e9e; box-shadow: none; transform: none; cursor: not-allowed; }
-        #healBtn { background: linear-gradient(135deg, #ff9800, #ff5722); display: none; margin-left: 8px; } 
-        #healBtn:hover { opacity: 0.9; transform: translateY(-1px); }
-        
-        ul { padding-left: 0; margin-bottom: 0; }
-        .test-item { margin-bottom: 10px; padding: 10px 12px; border-radius: 6px; list-style-type: none; transition: all 0.3s ease; border: 1px solid #eee; }
-        .default-test { background: white; border-left: 4px solid #b000ff; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-        
-        /* Header Flexbox */
-        .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 15px; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <!-- HEADER WITH BUTTONS AT THE TOP -->
-        <div class="header-row">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <h2 style="margin:0; font-size: 18px;">Agentic API Testing DASHBOARD</h2>
-            ${isHealed ? '<span style="background: #4CAF50; color: white; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight:bold;">✨ AI Healed</span>' : ''}
-          </div>
-          <div style="display: flex; align-items: center;">
-            <p id="status" style="color: #666; font-size: 12px; margin: 0 15px 0 0; font-style: italic;">Awaiting execution...</p>
-            <button id="runBtn" onclick="runTests()">Run Tests</button>
-            <button id="healBtn" onclick="triggerHeal()">✨ Auto-Fix</button>
-          </div>
-        </div>
-
-        <div class="dashboard-stats">
-          <div class="stat-box" id="box-total">
-            <div class="stat-value" id="val-total">$totalTests</div>
-            <div class="stat-label">Total Tests</div>
-          </div>
-          <div class="stat-box" id="box-passed">
-            <div class="stat-value" id="val-passed" style="color: #ccc;">-</div>
-            <div class="stat-label">Passed</div>
-          </div>
-          <div class="stat-box" id="box-failed">
-            <div class="stat-value" id="val-failed" style="color: #ccc;">-</div>
-            <div class="stat-label">Failed</div>
-          </div>
-        </div>
-
-        $explanationBox
-        <ul id="test-list">$htmlList</ul>
-      </div>
-      
-      <script>
-        window.onload = function() {
-          if ($totalTests === 0) {
-            const btn = document.getElementById('runBtn');
-            btn.disabled = true;
-            btn.style.background = '#e0e0e0';
-            btn.style.color = '#9e9e9e';
-            btn.style.cursor = 'not-allowed';
-            btn.style.boxShadow = 'none';
-            document.getElementById('status').innerText = 'Waiting for prompt...';
-          }
-        };
-
-        function runTests() {
-          document.getElementById('runBtn').innerText = 'Executing...';
-          document.getElementById('status').innerText = 'Bridging to native...';
-          document.getElementById('val-passed').innerText = '...';
-          document.getElementById('val-failed').innerText = '...';
-          
-          const msg = JSON.stringify({ method: 'tools/call', params: { isHealed: $isHealed } });
-          window.chrome.webview.postMessage(msg);
-        }
-        
-        function triggerHeal() {
-          document.getElementById('healBtn').innerText = 'Analyzing...';
-          const msg = JSON.stringify({ method: 'tools/heal', params: { content: '$safeContentForJs' } });
-          window.chrome.webview.postMessage(msg);
-        }
-
-        function receiveFromHost(msgStr) {
-           const res = JSON.parse(msgStr);
-           if (res.status === 'complete') {
-             document.getElementById('status').innerText = 'Execution Finished.';
-             document.getElementById('runBtn').innerText = 'Completed';
-             document.getElementById('runBtn').disabled = true;
-             
-             let passedCount = 0;
-             let failedCount = 0;
-             
-             res.results.forEach(r => {
-                const li = document.getElementById('test-' + r.index);
-                const msgBox = document.getElementById('msg-' + r.index);
-                if (r.passed) {
-                   passedCount++;
-                   if(li.classList.contains('default-test')) {
-                     li.style.borderLeft = '4px solid #4CAF50';
-                     li.style.background = '#f1f8e9';
-                   }
-                   msgBox.innerHTML = '<span style="color: #2e7d32; font-weight: bold;">✓ Passed: ' + r.message + '</span>';
-                } else {
-                   failedCount++;
-                   if(li.classList.contains('default-test')) {
-                     li.style.borderLeft = '4px solid #f44336';
-                     li.style.background = '#ffebee';
-                   }
-                   msgBox.innerHTML = '<span style="color: #c62828; font-weight: bold;">✗ Failed: ' + r.message + '</span>';
-                }
-             });
-             
-             document.getElementById('val-passed').innerText = passedCount;
-             document.getElementById('val-passed').style.color = passedCount > 0 ? '#4CAF50' : '#ccc';
-             document.getElementById('box-passed').style.borderColor = passedCount > 0 ? '#c8e6c9' : '#eee';
-             
-             document.getElementById('val-failed').innerText = failedCount;
-             document.getElementById('val-failed').style.color = failedCount > 0 ? '#f44336' : '#ccc';
-             document.getElementById('box-failed').style.borderColor = failedCount > 0 ? '#ffcdd2' : '#eee';
-             document.getElementById('box-failed').style.background = failedCount > 0 ? '#fff5f5' : '#f8f9fa';
-
-             if (failedCount > 0) {
-               document.getElementById('healBtn').style.display = 'inline-block';
-             }
-           }
-        }
-      </script>
-    </body>
-    </html>
-    ''';
-    await _webviewController.loadStringContent(html);
-  }
-
-  /// 4. THE NATIVE EXECUTION INTERCEPTOR
-  Future<void> _handleMcpMessage(String messageStr) async {
-    final Map<String, dynamic> request = jsonDecode(messageStr);
-
-    if (request['method'] == 'tools/call') {
-      final bool isAlreadyHealed = request['params']['isHealed'];
-      await Future.delayed(const Duration(seconds: 2)); // Simulate network request
-
-      String granularResponse;
-
-      if (!isAlreadyHealed) {
-        // First Run: 2 Pass, 2 Fail
-        granularResponse = jsonEncode({
-          'status': 'complete',
-          'results': [
-            {'index': 0, 'passed': true, 'message': '200 OK'},
-            {'index': 1, 'passed': false, 'message': '403 Forbidden. Missing Auth Token.'},
-            {'index': 2, 'passed': true, 'message': '201 Created'},
-            {'index': 3, 'passed': false, 'message': '400 Bad Request. Missing Payload.'}
-          ]
-        });
-      } else {
-        // Healed Run: All 4 Pass
-        granularResponse = jsonEncode({
-          'status': 'complete',
-          'results': [
-            {'index': 0, 'passed': true, 'message': '200 OK'},
-            {'index': 1, 'passed': true, 'message': '200 OK (Auth Validated)'},
-            {'index': 2, 'passed': true, 'message': '201 Created'},
-            {'index': 3, 'passed': true, 'message': '200 OK (Payload Validated)'}
-          ]
-        });
-      }
-
-      final safeJson = granularResponse.replaceAll("'", "\\'");
-      await _webviewController.executeScript("receiveFromHost('$safeJson')");
-    }
-    else if (request['method'] == 'tools/heal') {
-      _triggerSelfHealing(request['params']['content']);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F7), // Light gray background
+      backgroundColor: const Color(0xFFF5F5F7),
       body: Row(
         children: [
-          // SIDEBAR (Mockup)
+          // SIDEBAR
           Container(
             width: 250,
             color: Colors.white,
@@ -431,63 +251,88 @@ class _DashboardScreenState extends State<DashboardScreen> {
               padding: const EdgeInsets.all(30.0),
               child: Column(
                 children: [
-                  const Text("Define, Align, Achieve. Precision testing powered by AI.",
-                      style: TextStyle(color: Colors.grey, fontSize: 16)),
+                  const Text("Define, Align, Achieve. Precision testing powered by AI.", style: TextStyle(color: Colors.grey, fontSize: 16)),
                   const SizedBox(height: 20),
 
-                  // THE WEBVIEW SANDBOX (Agent Console)
+                  // THE RENDER SURFACE (With Fallback Logic)
                   Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: _isWebviewInitialized
-                          ? Webview(_webviewController)
-                          : const Center(child: CircularProgressIndicator()),
-                    ),
+                    child: _currentDashboardData == null
+                        ? const Center(child: CircularProgressIndicator())
+                        : (_useStrictGenUiEngine
+                    // If GenUI updates and stabilizes, swap to the official renderer here
+                        ? const Center(child: Text("Strict GenUI Surface Enabled"))
+                    // The completely stable native fallback mapping the GenUI data
+                        : NativeTestDashboard(
+                      data: _currentDashboardData!,
+                      isHealed: _isHealedRun,
+                      onHealRequested: (results) => _triggerSelfHealing(results),
+                    )),
                   ),
 
                   const SizedBox(height: 20),
 
-                  // THE CHAT INPUT (Gradient Border Simulation)
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(colors: [Colors.blueAccent, Colors.purpleAccent]),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    padding: const EdgeInsets.all(2),
-                    child: Container(
-                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _promptController,
-                              decoration: const InputDecoration(
-                                hintText: "Type your API testing goal here (e.g., 'Test my checkout workflow')",
-                                border: InputBorder.none,
-                                contentPadding: EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-                              ),
-                              onSubmitted: _generateTestPlan,
-                            ),
-                          ),
-                          if (_isAiThinking)
-                            const Padding(padding: EdgeInsets.only(right: 20), child: CircularProgressIndicator())
-                          else
-                            Padding(
-                              padding: const EdgeInsets.only(right: 10),
-                              child: ElevatedButton.icon(
-                                onPressed: () => _generateTestPlan(_promptController.text),
-                                icon: const Icon(Icons.auto_awesome),
-                                label: const Text("Generate"),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFFf0f0ff),
-                                  foregroundColor: const Color(0xFF6b4ce6),
-                                  elevation: 0,
-                                ),
-                              ),
-                            )
-                        ],
+                  // THE CHAT INPUT
+                  Column(
+                    children: [
+                      Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: TextField(
+                        controller: _urlController,
+                        decoration: const InputDecoration(
+                          hintText: "Enter target URL (e.g., https://reqres.in)",
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                          prefixIcon: Icon(Icons.link, color: Colors.grey),
+                        ),
                       ),
                     ),
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(colors: [Colors.blueAccent, Colors.purpleAccent]),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        padding: const EdgeInsets.all(2),
+                        child: Container(
+                          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _promptController,
+                                  decoration: const InputDecoration(
+                                    hintText: "Type your API testing goal here...",
+                                    border: InputBorder.none,
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                                  ),
+                                  onSubmitted: _generateTestPlan,
+                                ),
+                              ),
+                              if (_isAiThinking)
+                                const Padding(padding: EdgeInsets.only(right: 20), child: CircularProgressIndicator())
+                              else
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 10),
+                                  child: ElevatedButton.icon(
+                                    onPressed: () => _generateTestPlan(_promptController.text),
+                                    icon: const Icon(Icons.auto_awesome),
+                                    label: const Text("Generate"),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFFf0f0ff),
+                                      foregroundColor: const Color(0xFF6b4ce6),
+                                      elevation: 0,
+                                    ),
+                                  ),
+                                )
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   )
                 ],
               ),
@@ -505,12 +350,321 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           Icon(icon, color: isActive ? const Color(0xFF6b4ce6) : Colors.grey),
           const SizedBox(width: 15),
-          Text(title, style: TextStyle(
-              color: isActive ? const Color(0xFF6b4ce6) : Colors.grey,
-              fontWeight: isActive ? FontWeight.bold : FontWeight.normal
-          )),
+          Text(title, style: TextStyle(color: isActive ? const Color(0xFF6b4ce6) : Colors.grey, fontWeight: isActive ? FontWeight.bold : FontWeight.normal)),
         ],
       ),
     );
   }
 }
+
+// ============================================================================
+// THE NATIVE FLUTTER COMPONENT (The stable fallback)
+// ============================================================================
+class NativeTestDashboard extends StatefulWidget {
+  final Map<String, dynamic> data;
+  final bool isHealed;
+  final void Function(List<Map<String, dynamic>>) onHealRequested;
+
+  const NativeTestDashboard({super.key, required this.data, required this.isHealed, required this.onHealRequested});
+
+  @override
+  State<NativeTestDashboard> createState() => _NativeTestDashboardState();
+}
+
+class _NativeTestDashboardState extends State<NativeTestDashboard> {
+  bool _isExecuting = false;
+  bool _isComplete = false;
+  List<Map<String, dynamic>> _results = [];
+
+  @override
+  void didUpdateWidget(NativeTestDashboard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If the AI gives us new or healed data, reset the UI execution state
+    if (oldWidget.data != widget.data) {
+      setState(() {
+        _isComplete = false;
+        _isExecuting = false;
+        _results = [];
+      });
+    }
+  }
+
+  void _runTests() async {
+    setState(() {
+      _isExecuting = true;
+      _isComplete = false;
+      _results = [];
+    });
+
+    final List<dynamic> tests = widget.data['tests'] ?? [];
+    List<Map<String, dynamic>> realResults = [];
+
+    for (int i = 0; i < tests.length; i++) {
+      final test = tests[i];
+
+      try {
+        // We now pass the exact URL, Method, and Body generated by the AI!
+        final mcpResponse = await mcpService.executeTool(
+            'execute_apidash_request',
+            {
+              "url": test['url'],
+              "method": test['method'],
+              "headers": {"Content-Type": "application/json"},
+              "body": test['body'] != null && test['body'].toString().isNotEmpty ? test['body'] : null
+            }
+        );
+
+        final content = mcpResponse['content'][0]['text'];
+        final httpResult = jsonDecode(content);
+        final int actualStatusCode = httpResult['status_code'];
+        final int expectedStatusCode = test['expected_status'];
+
+        // grading: match by HTTP status class (2xx, 4xx, 5xx)
+        // If the AI wants a 400 but gets a 403, it's still a successful negative test.
+        bool isSuccess = false;
+        if (expectedStatusCode >= 200 && expectedStatusCode < 300) {
+          isSuccess = (actualStatusCode >= 200 && actualStatusCode < 300);
+        } else if (expectedStatusCode >= 400 && expectedStatusCode < 500) {
+          isSuccess = (actualStatusCode >= 400 && actualStatusCode < 500);
+        } else {
+          isSuccess = (actualStatusCode == expectedStatusCode);
+        }
+
+        realResults.add({
+          'index': i,
+          'passed': isSuccess,
+          'message': 'Got $actualStatusCode (Expected $expectedStatusCode)'
+        });
+
+      } catch (e) {
+        realResults.add({
+          'index': i,
+          'passed': false,
+          'message': 'MCP Execution Failed: $e'
+        });
+      }
+    }
+
+    setState(() {
+      _results = realResults;
+      _isExecuting = false;
+      _isComplete = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<dynamic> tests = widget.data['tests'] ?? [];
+    final int totalTests = tests.length;
+    final int passedCount = _results.where((r) => r['passed'] == true).length;
+    final int failedCount = _results.where((r) => r['passed'] == false).length;
+
+    return Container(
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade300)),
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  const Text("Agentic API Testing DASHBOARD", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(width: 10),
+                  if (widget.isHealed)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(color: Colors.green, borderRadius: BorderRadius.circular(12)),
+                      child: const Text("✨ AI Healed", style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                    )
+                ],
+              ),
+              Row(
+                children: [
+                  if (_isExecuting) const Text("Bridging to native...", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+                  const SizedBox(width: 15),
+                  if (totalTests > 0 && !_isComplete)
+                    ElevatedButton(
+                      onPressed: _isExecuting ? null : _runTests,
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6b4ce6), foregroundColor: Colors.white),
+                      child: Text(_isExecuting ? "Executing..." : "Run Tests"),
+                    ),
+                  if (_isComplete && failedCount > 0)
+                    ElevatedButton.icon(
+                      onPressed: () { widget.onHealRequested(_results); },
+                      icon: const Icon(Icons.auto_fix_high, size: 16),
+                      label: const Text("Auto-Fix"),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
+                    )
+                ],
+              )
+            ],
+          ),
+          const Divider(height: 30),
+          Row(
+            children: [
+              _statBox("Total Tests", totalTests.toString(), Colors.grey.shade100, Colors.black),
+              const SizedBox(width: 10),
+              _statBox("Passed", _isComplete ? passedCount.toString() : "-", passedCount > 0 ? Colors.green.shade50 : Colors.grey.shade100, passedCount > 0 ? Colors.green : Colors.grey),
+              const SizedBox(width: 10),
+              _statBox("Failed", _isComplete ? failedCount.toString() : "-", failedCount > 0 ? Colors.red.shade50 : Colors.grey.shade100, failedCount > 0 ? Colors.red : Colors.grey),
+            ],
+          ),
+          const SizedBox(height: 15),
+          if (widget.data['explanation'] != null && widget.data['explanation'].isNotEmpty)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: widget.isHealed ? Colors.green.shade50 : const Color(0xFFf3e5f5),
+                border: Border(left: BorderSide(color: widget.isHealed ? Colors.green : const Color(0xFFb000ff), width: 4)),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text("${widget.isHealed ? '🛠️ What was modified:' : '💡 AI Test Strategy:'} ${widget.data['explanation']}", style: const TextStyle(fontSize: 13)),
+            ),
+          const SizedBox(height: 15),
+          Expanded(
+            child: ListView.builder(
+              itemCount: tests.length,
+              itemBuilder: (context, index) {
+                final test = tests[index];
+                final result = _results.isNotEmpty ? _results[index] : null;
+                Color borderColor = const Color(0xFFb000ff);
+                Color bgColor = Colors.white;
+                if (result != null) {
+                  borderColor = result['passed'] ? Colors.green : Colors.red;
+                  bgColor = result['passed'] ? Colors.green.shade50 : Colors.red.shade50;
+                }
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  // Outer container provides the solid left border color and the rounded corners
+                  decoration: BoxDecoration(
+                      color: borderColor, // This is the thick left border
+                      borderRadius: BorderRadius.circular(6),
+                      boxShadow: [
+                        BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 4, offset: const Offset(0, 2))
+                      ]
+                  ),
+                  child: Container(
+                    // Inner container is shifted 4px to the right to reveal the outer color
+                    margin: const EdgeInsets.only(left: 4),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: bgColor,
+                      // Now all borders match, keeping Flutter happy!
+                      border: Border.all(color: Colors.grey.shade200),
+                      borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(6),
+                          bottomRight: Radius.circular(6)
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(test['title'] ?? test['name'] ?? 'AI Hallucinated Title', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                        const SizedBox(height: 4),
+                        Text("Expects: ${test['expected'] ?? test['status'] ?? 'Unknown'}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                        Text("Tested: ${test['method']} ${test['url']}", style: const TextStyle(color: Colors.blueAccent, fontSize: 11)),
+                        if (result != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            "${result['passed'] ? '✓ Passed' : '✗ Failed'}: ${result['message']}",
+                            style: TextStyle(color: result['passed'] ? Colors.green.shade700 : Colors.red.shade700, fontWeight: FontWeight.bold, fontSize: 12),
+                          )
+                        ]
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _statBox(String label, String value, Color bgColor, Color textColor) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)),
+        child: Column(
+          children: [
+            Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: textColor)),
+            Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey, letterSpacing: 0.5)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+class McpService {
+  Isolate? _isolate;
+  SendPort? _serverSendPort; // The port we use to send msgs TO the server
+  final ReceivePort _uiReceivePort = ReceivePort(); // The port the server sends msgs TO
+
+  int _requestId = 1;
+  final Map<int, Completer<Map<String, dynamic>>> _pendingRequests = {};
+
+  final Completer<void> _initCompleter = Completer<void>();
+
+  Future<void> start() async {
+    if (_isolate != null) return;
+
+    // Listen to messages coming from the background Isolate
+    _uiReceivePort.listen((message) {
+      if (message is SendPort) {
+        // Step 1: The isolate gave us its listening port! We are connected.
+        _serverSendPort = message;
+        _initCompleter.complete();
+      } else if (message is String) {
+        // Step 2: The isolate sent us a JSON-RPC response
+        try {
+          final response = jsonDecode(message);
+          final id = response['id'];
+          if (id != null && _pendingRequests.containsKey(id)) {
+            _pendingRequests[id]!.complete(response['result']);
+            _pendingRequests.remove(id);
+          }
+        } catch (e) {
+          debugPrint('MCP UI Parse Error: $e');
+        }
+      }
+    });
+
+    // Spawn the server in a separate thread, passing our receive port for the handshake
+    _isolate = await Isolate.spawn(runMcpIsolate, _uiReceivePort.sendPort);
+
+    // Wait for the handshake to finish
+    await _initCompleter.future;
+    debugPrint("✅ Internal MCP Isolate Running!");
+  }
+
+  Future<Map<String, dynamic>> executeTool(String name, Map<String, dynamic> arguments) async {
+    if (_serverSendPort == null) await start();
+
+    final id = _requestId++;
+    final completer = Completer<Map<String, dynamic>>();
+    _pendingRequests[id] = completer;
+
+    final request = jsonEncode({
+      "jsonrpc": "2.0",
+      "id": id,
+      "method": "tools/call",
+      "params": {
+        "name": name,
+        "arguments": arguments
+      }
+    });
+
+    // Send the JSON string to the background isolate
+    _serverSendPort!.send(request);
+
+    return completer.future;
+  }
+}
+
+final mcpService = McpService();
