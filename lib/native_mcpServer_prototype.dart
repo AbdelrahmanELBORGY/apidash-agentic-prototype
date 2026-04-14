@@ -4,8 +4,8 @@ import 'package:http/http.dart' as http;
 
 void main() {
   stdin.transform(utf8.decoder).transform(const LineSplitter()).listen((
-    line,
-  ) async {
+      line,
+      ) async {
     try {
       final requestJson = jsonDecode(line);
       final id = requestJson['id'];
@@ -39,12 +39,12 @@ void main() {
                 {
                   "name": "run_agentic_tests",
                   "description":
-                      "Runs the full end-to-end autonomous API testing workflow.",
+                  "Runs the full end-to-end autonomous API testing workflow.",
                   "arguments": [
                     {
                       "name": "api_spec_url",
                       "description":
-                          "The URL of the real OpenAPI JSON file to test.",
+                      "The URL of the real OpenAPI JSON file to test.",
                       "required": true,
                     },
                   ],
@@ -60,7 +60,7 @@ void main() {
         final specUrl = requestJson['params']['arguments']['api_spec_url'];
 
         final promptText =
-            """
+        """
 You are the API Dash Autonomous Testing Agent. I want you to perform an advanced, end-to-end Agentic API testing workflow based on the following specification: $specUrl
 
 Step 1: Understand & Strategize
@@ -107,7 +107,7 @@ Print out a final Test Coverage Report detailing:
                 {
                   "name": "read_openapi_spec",
                   "description":
-                      "Fetches a real OpenAPI JSON specification from a URL.",
+                  "Fetches a real OpenAPI JSON specification from a URL.",
                   "inputSchema": {
                     "type": "object",
                     "properties": {
