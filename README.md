@@ -1,130 +1,95 @@
-# API Dash Agentic API Testing with MCP app Prototype (GSoC 2026)
+# API Dash Autonomous Testing Agent PoC - GSOC 2026
 
-This repository contains a functional Model Context Protocol (MCP) implementation within a native Flutter desktop environment. It serves as the primary technical validation for my GSoC 2026 proposal, demonstrating how AI agents can autonomously generate, execute, and self-heal API test suites.
+An experimental prototype that brings **Human-in-the-Loop (HITL) AI-driven API testing** directly into Flutter. This project leverages Google's Gemini Models and the Model Context Protocol (MCP) to autonomously read OpenAPI specifications, dynamically generate chained HTTP requests, and execute them safely under user supervision.
 
-## Visual sneak
+---
 
-<img width="1500" height="750" alt="image" src="https://github.com/user-attachments/assets/1f84edcc-7d6f-4841-8821-1fff15ef3861" />
+## The approach
 
-## Challenges
-Sandard AI integrations in developer tools are often restricted to "chatboxes" that lack deep integration with the host application's UI and native capabilities. This project solves two major hurdles:
+Traditional API testing requires developers to manually parse Swagger files, copy endpoints, build JSON payloads, and chain requests together (e.g., extracting an ID from a `POST` response to use in a `GET` request).
 
-1. Dynamic UI in AOT: Bypassing Flutter's AOT compilation limits to allow an LLM to "invent" and render interactive dashboards on the fly.
+This prototype flips that paradigm. You provide an **OpenAPI URL** and an **API key**. An autonomous agent (Gemini 2.5 Flash) does the rest:
+1. **Reads and comprehends** the complex OpenAPI JSON specification.
+2. **Strategizes a multi-step test workflow**, intentionally chaining data between endpoints.
+3. **Pauses for Human Consent** before firing any actual HTTP requests, presenting the exact payload to the user in a beautiful, structured UI card.
+4. **Executes and Self-Heals.** If a request fails (e.g., a 400 Bad Request), the agent parses the error, fixes the payload, and tries again.
+5. **Generates a comprehensive Markdown test report** summarizing the execution lifecycle.
 
-2. Native Execution: Allowing a sandboxed AI-generated interface to trigger high-performance, native Dart HTTP requests that bypass browser CORS restrictions.
-Gemini said
-To make your prototype repository stand out to the API Dash mentors, your README needs to transition from "simple code dump" to "professional engineering research." It should highlight that you didn't just write a script—you designed a system architecture.
+---
+## Visual Overview
+![visualOverview](lib/Visuals/visualOverview.gif)
+---
+## Architecture
 
-## Key Features
-1. Agentic Reasoning Engine
-The system uses Gemini 2.5 Flash (API key included just for the prototype) to ingest API goals and generate structured JSON test strategies. It doesn't just suggest code; it designs functional, edge-case, and security-focused test plans.
+This application employs a modern **Agentic ReAct (Reason + Act)** loop paired with a strict **Isolate-based MCP Backend** for security and performance.
 
-2. OS-Aware MCP Sandbox
-To ensure production-grade stability on Windows Native Desktop, the prototype implements a WebView Adapter Pattern. It utilizes webview_windows (Microsoft Edge WebView2) to provide a secure, high-performance sandbox for AI-generated "MCP Apps".
+### 1. The Frontend (Flutter UI)
+* **ReAct Loop Manager:** Manages the active `ChatSession` with Gemini, parsing text reasoning and intercepting `FunctionCall` requests.
+* **HITL Feed:** Renders pending tool calls as interactive UI cards. It pauses the agent's execution loop until the user clicks "Execute Test."
+* **Markdown Renderer:** Automatically formats the final agent-generated test reports using `flutter_markdown`.
 
-3. Autonomous Self-Healing with Visual Diffs
-When a test fails (e.g., a 403 Forbidden error), the agent captures the native stack trace and response body. It then:
+### 2. The Backend (Dart Isolate via MCP)
+* **Model Context Protocol (MCP):** I implemented a native, lightweight version of Anthropic's open-source MCP standard over Dart's `SendPort`/`ReceivePort`.
+* **Execution Isolate:** To prevent the UI thread from hanging during heavy HTTP requests or JSON parsing, all tool execution and prompt generation happens in a background Isolate.
+* **Tool Handlers:**
+    * `read_openapi_spec`: Fetches remote JSON files.
+    * `execute_apidash_request`: Constructs HTTP requests from dynamic agent payloads and executes them via the `http` package.
 
-- Analyzes the failure root cause.
+---
 
-- Generates a fix (e.g., adding a missing Authorization header).
+## Tools & Approaches Used
 
-- Visualizes the change using a side-by-side Red/Green Diff UI, allowing users to approve the "healed" test case before re-execution.
+* **Framework:** Flutter / Dart
+* **AI Engine:** Google Generative AI SDK (`google_generative_ai`)
+* **Model:** `gemini-2.5-flash` (Chosen for high-speed function calling and context window capabilities).
+* **Architecture Pattern:** Human-in-the-Loop (HITL) Agentic Workflow.
+* **Communication Protocol:** JSON-RPC 2.0 (Model Context Protocol).
+* **UI/UX:** Custom Material 3 Dark Theme with dynamic status badges (Pending/Passed/Failed) and raw JSON payload viewers.
 
-4. Real-Time Metrics Dashboard
-The UI features a dynamic metrics bar that tracks Passed, Failed, and Total tests. These values are synchronized in real-time between the native Dart execution layer and the Javascript-driven dashboard via a JSON-RPC bridge.
+---
 
-## Technical Architecture
-The system operates on a three-tier architecture:
+## 🚀 Getting Started
 
-**The Host (Dart)**: Handles LLM orchestration, native HTTP networking, and state management.
+### Prerequisites
+* Flutter SDK (Version 3.19+)
+* A valid Google Gemini API Key. (Get one at [Google AI Studio](https://aistudio.google.com/))
 
-**The Bridge (JSON-RPC)**: Facilitates secure asynchronous communication (tools/call, tools/heal) between native code and the sandbox.
+### Installation
+1. **Clone the repository and switch to the HITL prototype branch:**
+   ```bash
+   git clone https://github.com/AbdelrahmanELBORGY/apidash-agentic-prototype.git
+   cd mcp_agentic_api_prototype
+   git checkout Full_Workflow_Testing_humanInLoop
 
-**The Sandbox (HTML/JS)**: Renders the AI's "thoughts" into an interactive, reactive dashboard.
+2. **Install dependencies:**
+   ```bash
+   flutter pub get
 
-## Tech Stack
-- **Flutter & Dart**
-- **Google Generative AI (Gemini 2.5 Flash)**
-- **webview_windows** (Microsoft Edge WebView2)
-- **Model Context Protocol (MCP)** principles
+3. **Run the application:**
+   ```bash
+   flutter run
 
-## Getting Started
-**Prerequisites**
-1. Flutter SDK (Stable Channel)
+---
 
-2. Visual Studio 2022 (with "Desktop development with C++" workload)
+## 🌐Usage Guide
+1. Launch the app (desktop or web is recommended for the best layout).
 
-3. A Gemini API Key (in case not included)
+2. Paste your Gemini API Key into the sidebar.
 
-## Installation
-1. Clone the repository:
+3. In the bottom input bar, paste a valid OpenAPI / Swagger JSON URL, example: `https://petstore.swagger.io/v2/swagger.json`
 
-- Bash
-- git clone https://github.com/AbdelrahmanELBORGY/apidash-agentic-prototype.git
-- cd apidash-agentic-prototype
+3. Click Start Workflow.
 
-2. Install dependencies:
+4. The agent will begin reasoning. When it decides to make a network request, a card will appear. Review the Expected Outcome and Execution Payload.
 
-- Bash
-- flutter pub get
-- Configure your API Key:
-Open lib/main.dart and replace API_KEY with your actual Gemini key.
+5. Click Execute Test to approve the action.
 
-3. Run for Windows:
+6. Repeat until the agent compiles the final Markdown execution report.
 
-- Bash
-- flutter run -d windows
-
-### Option B: Run the External Plugin (Claude Desktop Integration)
-
-This prototype includes `native_mcpServer_prototype.dart`, a headless MCP server that exposes API testing capabilities directly to Claude Desktop.
-
-**Prerequisites:**
-* Dart SDK installed globally on your machine.
-* Claude Desktop App installed.
-
-**Step 1: Locate the Dart file**
-Find the absolute path to the `native_mcpServer_prototype.dart` file on your machine (e.g., `C:\Users\Name\apidash-agentic-prototype\native_mcpServer_prototype.dart` or `/Users/Name/apidash-agentic-prototype/native_mcpServer_prototype.dart`).
-
-**Step 2: Update Claude Desktop Configuration**
-You can easily open the configuration file directly from the Claude Desktop app:
-1. Open Claude Desktop.
-2. Go to **Settings** (click your profile name in the bottom left).
-3. Click on the **Developer** tab in the left sidebar.
-4. Click the **Edit Config** button. This will automatically open the `claude_desktop_config.json` file in your default text editor.
-   
-<img width="2127" height="1514" alt="image" src="https://github.com/user-attachments/assets/5cbc7bea-5a92-4e3f-8c8f-33c481f995bd" />
-
-Add the Dart MCP server to the configuration (replace the path with your absolute path):
-
-```json
-{
-  "mcpServers": {
-    "apidash-agentic-engine": {
-      "command": "dart",
-      "args": [
-        "run",
-        "YOUR_ABSOLUTE_PATH_HERE/native_mcpServer_prototype.dart"
-      ]
-    }
-  }
-}
-```
-
-**Step 3: Restart Claude Desktop**
-Completely quit and restart Claude Desktop. 
-
-**Step 4: Run the Agentic Workflow**
-1. Click the **+** (plus) icon next to the chat input bar in Claude Desktop.
-2. Navigate to **Connectors** > **Add from [your_server_name]** (e.g., `apidash-agentic-engine` or `api_dash_native`).
-3. Select the **Run agentic tests** prompt.
-4. Paste a public OpenAPI specification URL into the argument box (e.g., the Swagger Petstore: `https://raw.githubusercontent.com/OAI/OpenAPI-Specification/main/examples/v3.0/petstore.json`) and press Enter.
-<img width="2124" height="1525" alt="image" src="https://github.com/user-attachments/assets/cde22339-a495-460c-ac4a-1c82792a1d15" />
-
-
-Watch as Claude autonomously reads the spec, generates accurate mock data, and executes native HTTP tests bypassing all CORS restrictions!
-
+---
+## Visual Demo
+![VisualDemo](lib/Visuals/VisualDemo.gif)
+---
 
 ## GSoC 2026 Proposal
 This prototype is part of a comprehensive proposal for API Dash.
